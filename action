@@ -106,13 +106,16 @@ sub get_accountinfo {
 	next if $candidate->{&param_primarykey} ne $condition{&param_primarykey};
 	my $history = $DB->resultset('Log')->find_or_create( { &param_primarykey => $condition{&param_primarykey} } );
 	my $failcount = ( $history->failcount || 0 );
-	if( $failcount <= &param_threshold ){
-	    for my $key ( @{&param_identificationkeys} ){
-		unless( $candidate->{$key} eq $condition{$key} ){
-		    $history->failcount( $failcount + 1 );
-		    $history->update();
-		    return undef;
-		}
+	if( $failcount > &param_threshold ){
+	    $history->failcount( $failcount + 1 );
+	    $history->update();
+	    return undef;
+	}
+	for my $key ( @{&param_identificationkeys} ){
+	    unless( $candidate->{$key} eq $condition{$key} ){
+		$history->failcount( $failcount + 1 );
+		$history->update();
+		return undef;
 	    }
 	}
 	$history->dtime( DBIx::Class::TimeStamp->get_timestamp() );
