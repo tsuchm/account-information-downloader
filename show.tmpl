@@ -1,0 +1,42 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<link rel="stylesheet" href="../../downloader.css" type="text/css" />
+<title>Account Information Downloader</title>
+</head>
+<body>
+
+<h1>Download Status</h1>
+
+<blockquote>
+ <table border="1">
+  <thead>
+   <tr>
+    <td>Name</td>
+    <td>E-mail</td>
+    <td>Download Time</td>
+    <td>Download IP Address</td>
+    <td>Fail Count</td>
+   </tr>
+   </thead>
+  <tbody>
+  <TMPL_LOOP name="accounts">
+  <tr>
+   <td><TMPL_VAR name="name"></td>
+   <td><TMPL_VAR name="mail"></td>
+   <td><TMPL_VAR name="dtime"></td>
+   <td><TMPL_VAR name="ipaddr"></td>
+   <td><TMPL_VAR name="failcount"></td>
+  </tr>
+  </TMPL_LOOP>
+  </tbody>
+ </table>
+</blockquote>
+
+</body>
+</html>
+<!-- Local Variables: -->
+<!-- mode: yahtml -->
+<!-- coding: utf-8 -->
+<!-- End: -->

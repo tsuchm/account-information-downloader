@@ -1,0 +1,364 @@
+#!/usr/bin/perl
+
+use CGI qw/ header /;
+use CGI::Carp qw/ fatalsToBrowser /;
+use CGI::Fast;
+use CGI::Session qw/ -ip-match /;
+use Config::Simple qw/ -lc /;
+use Cwd qw/ abs_path /;
+use DateTime;
+use DateTime::Format::SQLite;
+use DBIx::Class;
+use Encode qw/ decode_utf8 /;
+use English qw/ $PROGRAM_NAME /;
+use File::Basename qw/ dirname /;
+use File::stat;
+use HTML::Template;
+use Text::CSV_XS;
+use strict;
+use warnings;
+use utf8;
+use feature qw/ state /;
+use open qw/ :utf8 :std /;
+use constant CONFIGFILE => 'downloader.ini';
+
+our $CONFIG;
+our $DB;
+&main();
+
+sub main {
+    my $mtime = stat($PROGRAM_NAME)->mtime;
+    while( my $cgi = CGI::Fast->new ){
+	exit if stat($PROGRAM_NAME)->mtime > $mtime;
+	&read_config();
+	my $session = CGI::Session->new( 'driver:sqlite', $cgi, { Handle => $DB->storage->dbh } );
+	$session->expire( sprintf( '+%dm', int( &param_sessionperiod / 60 ) ) );
+	&action( $cgi, $session );
+	CGI::Session->find( 'driver:sqlite', \&expire_session, { Handle => $DB->storage->dbh } );
+    }
+}
+
+sub action {
+    my( $cgi, $session ) = @_;
+    if( $cgi->path_info =~ m!/status\Z! ){
+	print &header( -status => 200, -type => 'text/plain' ), "OK";
+    } elsif( $cgi->path_info =~ m!/start\Z! ){
+	&start( $cgi, $session );
+    } elsif( $cgi->path_info =~ m!/check\Z! ){
+	&check( $cgi, $session );
+    } elsif( my( $secret ) = $cgi->path_info =~ m!/show/([a-zA-Z0-9]+)\Z! ){
+	if( $secret eq &param_secret ){
+	    &show( $cgi, $session );
+	} else {
+	    print &header( -status => 403, -type => 'text/plain' ), "Access forbidden\n";
+	}
+    } else {
+	print &header( -status => 404, -type => 'text/plain' ), "No valid action.";
+    }
+}
+
+sub start {
+    my( $cgi, $session, $error ) = @_;
+    my $template = &open_template( filename => 'start.tmpl', die_on_bad_params => 0 );
+    $template->param( error => $error ) if $error;
+    &fill_template( $template );
+    print( &header( -type => 'text/html',
+		    -charset => 'UTF-8',
+		    -cookie => &cookie_string( $cgi, $session ) ) );
+    &fcgi_print( $template->output );
+}
+
+sub check {
+    my( $cgi, $session ) = @_;
+    my $failcount = $session->param( 'failcount' ) || 0;
+    if( $failcount <= &param_threshold ){
+	my $user = &get_accountinfo( $session->remote_addr,
+				     map( ( $_ => $cgi->param($_) ),
+					  &param_primarykey, @{&param_identificationkeys} ) );
+	if( $user ){
+	    $session->param( failcount => 0 );
+	    my $template = &open_template( filename => 'check.tmpl', die_on_bad_params => 1 );
+	    for my $k ( $template->param() ){
+		$template->param( $k => $user->{$k} ) if defined $user->{$k};
+	    }
+	    print( &header( -type => 'text/html',
+			    -charset => 'UTF-8',
+			    -cookie => &cookie_string( $cgi, $session ) ) );
+	    &fcgi_print( $template->output );
+	    return;
+	}
+    }
+    $session->param( failcount => $failcount + 1 );
+    &start( $cgi, $session, 'One of your specified information does not match to our database.' );
+}
+
+sub get_accountinfo {
+    my( $ipaddr, %condition ) = @_;
+    while( my( $k, $v ) = each %condition ){
+	$v =~ s/\A\s+//;
+	$v =~ s/\s+\Z//;
+	if( $k eq 'birthday' ){
+	    $v =~ s!\A(\d+)-(\d+)-(\d+)!sprintf('%04d/%02d/%02d', $1, $2, $3)!e;
+	}
+	$condition{$k} = $v;
+    }
+    for my $candidate ( @{&param( &param_target )} ){
+	next if $candidate->{&param_primarykey} ne $condition{&param_primarykey};
+	my $history = $DB->resultset('Log')->find_or_create( { &param_primarykey => $condition{&param_primarykey} } );
+	my $failcount = ( $history->failcount || 0 );
+	if( $failcount <= &param_threshold ){
+	    for my $key ( @{&param_identificationkeys} ){
+		unless( $candidate->{$key} eq $condition{$key} ){
+		    $history->failcount( $failcount + 1 );
+		    $history->update();
+		    return undef;
+		}
+	    }
+	}
+	$history->dtime( DBIx::Class::TimeStamp->get_timestamp() );
+	$history->ipaddr( $ipaddr );
+	$history->update;
+	return $candidate;
+    }
+    undef;
+}
+
+sub show {
+    my( $cgi, $session ) = @_;
+    my $template = &open_template( filename => 'show.tmpl', die_on_bad_params => 0 );
+    &fill_template( $template );
+    print( &header( -type => 'text/html',
+		    -charset => 'UTF-8',
+		    -cookie => &cookie_string( $cgi, $session ) ) );
+    &fcgi_print( $template->output );
+}
+
+sub cookie_string {
+    my( $cgi, $session ) = @_;
+    $cgi->cookie( -name => $session->name,
+		  -value => $session->id,
+		  -domain => $cgi->server_name,
+		  -path => $cgi->script_name );
+}
+
+sub fill_template {
+    my( $template ) = @_;
+    for my $key ( $template->param() ){
+	my $value = &param($key);
+	next unless defined $value;
+	if( $template->query( name => $key ) eq 'LOOP' ){
+	    my( @param ) = $template->query( loop => $key );
+	    my @buf;
+	    for my $x ( @{$value} ){
+		my %new;
+		my $history;
+		if( $key eq &param_target and defined $x->{&param_primarykey} ){
+		    $history = $DB->resultset('Log')->find_or_create( { &param_primarykey => $x->{&param_primarykey} } );
+		}
+		for my $k ( @param ){
+		    $new{$k} = $x->{$k} if defined $x->{$k};
+		    if( $history and $history->can($k) ){
+			$new{$k} = $history->$k();
+		    }
+		}
+		push( @buf, \%new );
+	    }
+	    $template->param( $key => \@buf );
+	} else {
+	    $template->param( $key => $value );
+	}
+    }
+}    
+
+sub open_template {
+    my( %option ) = @_;
+    push( @_, filter => \&utf8_template_filter ) unless $option{filter};
+    push( @_, default_escape => 'HTML' ) unless $option{default_escape};
+    unless( $option{path} ){
+	my $curdir = &dirname( &abs_path( $ENV{SCRIPT_FILENAME} || $PROGRAM_NAME ) );
+	push( @_, path => [$curdir] );
+    }
+    HTML::Template->new( @_ );
+}
+
+sub utf8_template_filter {
+    my $ref = shift;
+    $$ref = &decode_utf8( $$ref );
+}
+
+sub _normal_fcgi_print {
+    print @_;
+}
+
+sub _fixed_fcgi_print {
+    my $buf = join( '', @_ );
+    &utf8::decode( $buf );
+    {
+	use bytes;
+	print $buf;
+    }
+}
+
+INIT {
+    no warnings;
+    if( eval { $FCGI::VERSION >= 0.69; } ){
+	*fcgi_print = \&_fixed_fcgi_print;
+    } else {
+	*fcgi_print = \&_normal_fcgi_print;
+    }
+}
+
+sub param_secret {
+    &param('secret');
+}
+
+sub param_dbfile {
+    &param('dbfile');
+}
+
+sub param_target {
+    &param('target');
+}
+
+sub param_threshold {
+    &param('threshold');
+}
+
+sub param_sessionperiod {
+    &param('sessionperiod');
+}
+
+sub param_primarykey {
+    &param('primarykey');
+}
+
+sub param_identificationkeys {
+    &param('identificationkeys');
+}
+
+sub param {
+    my $key = shift;
+    if( @_ ){
+	$CONFIG->{'default'}->{$key} = \@_;
+    } else {
+	my $r = $CONFIG->{$key};
+	if( $r and defined $r->{file} ){
+	    &read_csvfile( $r->{file}->[0] );
+	} else {
+	    my $v = $CONFIG->{'default'}->{$key};
+	    if( $v ){
+		if( @{$v} == 1 ){
+		    $v->[0];
+		} elsif( @{$v} ){
+		    $v;
+		}
+	    } else {
+		undef;
+	    }
+	}
+    }
+}
+
+sub read_csvfile {
+    my( $file ) = @_;
+    state %mtime;
+    state %cache;
+    if( -f $file and stat($file)->mtime > ( $mtime{$file} || 0 ) ){
+	$mtime{$file} = stat($file)->mtime;
+	open( my $fh, $file ) or die;
+	my $csv = Text::CSV_XS->new( { binary => 1 } );
+	$csv->parse( scalar <$fh> );
+	my( @field ) = $csv->fields;
+	my @buf;
+	while( $_ = <$fh> ){
+	    s/\A\s+//;
+	    s/\s+\Z//;
+	    s/\A([^#]*)#.*\Z/$1/;
+	    next unless $csv->parse( $_ );
+	    my( @value ) = map( &decode_utf8( $_ ), $csv->fields );
+	    my( %new ) = map( ( $field[$_] => $value[$_] ), 0 .. $#field );
+	    push( @buf, \%new );
+	}
+	$cache{$file} = \@buf;
+    }
+    $cache{$file};
+}
+
+sub read_config {
+    state $mtime = 0;
+    if( ( ! $CONFIG ) or ( -f CONFIGFILE and stat(CONFIGFILE)->mtime > $mtime ) ){
+	my $parser = Config::Simple->new( syntax => 'ini' );
+	$CONFIG = $parser->read( CONFIGFILE );
+	unless( defined &param('threshold') ){
+	    &param('threshold', 5);
+	}
+	unless( defined &param('sessionperiod') ){
+	    &param('sessionperiod', 600); # == 10min
+	}
+	$DB = &prepare_database();
+    }
+}
+
+sub prepare_database {
+    package My::Schema::Log {
+	use base qw/ DBIx::Class::Core /;
+	__PACKAGE__->load_components( qw/ TimeStamp InflateColumn::DateTime / );
+	__PACKAGE__->table('logs');
+	__PACKAGE__->add_columns( &main::param_primarykey() => { data_type => 'text', is_nullable => 0 },
+				  ctime => { data_type => 'timestamp', set_on_create => 1 },
+				  dtime => { data_type => 'timestamp', is_nullable => 1 },
+				  ipaddr => { data_type => 'text', is_nullable => 1 },
+				  failcount => { data_type => 'integer', is_nullable => 1 } );
+	__PACKAGE__->set_primary_key( &main::param_primarykey() );
+	1;
+    };
+    package My::Schema::Session {
+	use base 'DBIx::Class::Core';
+	__PACKAGE__->table('sessions');
+	__PACKAGE__->add_columns( id => { data_type => 'char(32)', is_nullable => 0 },
+				  a_session => { data_type => 'text', is_nullable => 0 } );
+	__PACKAGE__->set_primary_key('id');
+	1;
+    };
+    package My::Schema {
+	use base 'DBIx::Class::Schema';
+	__PACKAGE__->load_classes(qw/Log Session/);
+	1;
+    };
+
+    my $created = 0;
+    $created++ unless -f &param_dbfile;
+    my $schema = My::Schema->connect( sprintf('dbi:SQLite:dbname=%s', &param_dbfile), undef, undef, { AutoCommit => 1 }  );
+    $schema->deploy if $created;
+    $schema;
+}
+
+sub expire_session {
+    my( $s ) = @_;
+    return if $s->is_empty;
+    if( ( time - $s->ctime ) > &param_sessionperiod ){
+	$s->delete;
+	$s->flush;
+    }
+}
+
+=head1 AUTHOR
+
+TSUCHIYA Masatoshi <tsuchm@gmail.com>
+
+=head1 COPYRIGHT
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+=cut

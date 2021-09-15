@@ -1,0 +1,15 @@
+Options +ExecCGI -Indexes
+
+RedirectMatch ^(.*)/$ $1/action/start
+
+<Files action>
+    SetHandler fcgid-script
+</Files>
+
+<Files downloader.css>
+    Require all granted
+</Files>
+
+<FilesMatch "\.(csv|txt|tmpl|sqlite)$">
+    Require all denied
+</FilesMatch>

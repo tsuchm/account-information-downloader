@@ -1,0 +1,61 @@
+h1, h2 {
+	font-family: verdana, arial, helvetica, Sans-Serif;
+	color: inherit;
+	background-color: #CCFFCC;
+	padding: .3em;
+	border: 0px;
+	margin: 0px 0px .5em 0px;
+}
+
+h3 {
+	font-family: verdana, arial, helvetica, Sans-Serif;
+	border-bottom:  3px solid #CCFFCC;
+	border-top:     1px solid #CCFFCC;
+	border-left:   10px solid #CCFFCC;
+	border-right:   5px solid #CCFFCC;
+	color: inherit;
+	background-color: #FFFFFF;
+	padding: .3em;
+	margin: 0px 0px .5em 0px;
+}
+
+h4 {
+	font-family: verdana, arial, helvetica, Sans-Serif;
+	border-left: 18px solid #CCFFCC;
+	color: inherit;
+	background-color: #FFFFFF;
+	padding: .3em;
+	margin: 0px 0px .5em 0px;
+}
+
+h5, h6 {
+	font-family: verdana, arial, helvetica, Sans-Serif;
+	color: inherit;
+	background-color: #CCFFCC;
+ 	padding: .3em;
+ 	border: 0px;
+ 	margin: 0px 0px .5em 0px;
+}
+
+table.results {
+  background-color: white;
+//  width: 90%;
+//  margin-left: auto;
+//  margin-right: auto;
+  margin-top: 10pt;
+  margin-bottom: 10pt;
+}
+
+thead {
+  text-align: center;
+  color: white;
+  background-color: #808080;
+}
+
+.warning {
+	color: crimson;
+}
+
+.error {
+	color: red;
+}
